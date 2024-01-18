@@ -1,6 +1,7 @@
 package http
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -8,10 +9,12 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -92,10 +95,43 @@ func (hs *httpSource) Identifier(scheme, ref string, attrs map[string]string, pl
 				return nil, err
 			}
 			id.GID = int(i)
+		case pb.AttrHTTPHeader:
+			r := textproto.NewReader(bufio.NewReader(strings.NewReader(v)))
+			m, err := r.ReadMIMEHeader()
+			if err != nil {
+				return nil, err
+			}
+
+			h := http.Header(m)
+			err = requireAllowedHeaders(h)
+			if err != nil {
+				return nil, err
+			}
+
+			id.Header = h
 		}
 	}
 
 	return id, nil
+}
+
+var allowedHeaders = []string{"User-Agent", "Accept", "Accept-Language", "Referer"}
+var allowedHeaderPrefix = "X-"
+
+func requireAllowedHeaders(h http.Header) error {
+	var unsafeHeaders []string
+	for header := range h {
+		if !strings.HasPrefix(header, allowedHeaderPrefix) && !slices.Contains(allowedHeaders, header) {
+			unsafeHeaders = append(unsafeHeaders, header)
+		}
+	}
+
+	if len(unsafeHeaders) > 0 {
+		return fmt.Errorf("forbidden headers %v set. Only the headers %v and headers starting with \"%s\" are allowed",
+			unsafeHeaders, allowedHeaders, allowedHeaderPrefix)
+	}
+
+	return nil
 }
 
 type httpSourceHandler struct {
@@ -129,11 +165,13 @@ func (hs *httpSourceHandler) urlHash() (digest.Digest, error) {
 	dt, err := json.Marshal(struct {
 		Filename       string
 		Perm, UID, GID int
+		Header         http.Header
 	}{
 		Filename: getFileName(hs.src.URL, hs.src.Filename, nil),
 		Perm:     hs.src.Perm,
 		UID:      hs.src.UID,
 		GID:      hs.src.GID,
+		Header:   hs.src.Header,
 	})
 	if err != nil {
 		return "", err
@@ -147,6 +185,7 @@ func (hs *httpSourceHandler) formatCacheKey(filename string, dgst digest.Digest,
 		Perm, UID, GID int
 		Checksum       digest.Digest
 		LastModTime    string `json:",omitempty"`
+		Header         http.Header
 	}{
 		Filename:    filename,
 		Perm:        hs.src.Perm,
@@ -154,6 +193,7 @@ func (hs *httpSourceHandler) formatCacheKey(filename string, dgst digest.Digest,
 		GID:         hs.src.GID,
 		Checksum:    dgst,
 		LastModTime: lastModTime,
+		Header:      hs.src.Header,
 	})
 	if err != nil {
 		return dgst
@@ -184,6 +224,12 @@ func (hs *httpSourceHandler) CacheKey(ctx context.Context, g session.Group, inde
 	}
 	req = req.WithContext(ctx)
 	m := map[string]cacheRefMetadata{}
+
+	for k, vs := range hs.src.Header {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
 
 	// If we request a single ETag in 'If-None-Match', some servers omit the
 	// unambiguous ETag in their response.

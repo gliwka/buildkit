@@ -1,10 +1,15 @@
 package http
 
 import (
+	"bytes"
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/moby/buildkit/solver/pb"
 
 	"github.com/containerd/containerd/content/local"
 	"github.com/containerd/containerd/diff/apply"
@@ -282,6 +287,67 @@ func TestHTTPChecksum(t *testing.T) {
 
 	ref.Release(context.TODO())
 	ref = nil
+}
+
+func TestHTTPHeaderAllowlist(t *testing.T) {
+	t.Parallel()
+	hs, err := newHTTPSource(t)
+	require.NoError(t, err)
+
+	h := new(http.Header)
+	h.Add("User-Agent", "foo/6.0")
+	h.Add("Accept", "application/json")
+	h.Add("Accept", "*/*")
+	h.Add("Accept-Language", "de")
+	h.Add("Referer", "https://example.org")
+	h.Add("X-Vendor-Specific", "vendor")
+
+	buf := new(bytes.Buffer)
+	_ = h.Write(buf)
+
+	id, err := hs.Identifier("https", "example.org", map[string]string{pb.AttrHTTPHeader: buf.String()}, nil)
+	require.NoError(t, err)
+	require.Equal(t, h, id.(*HTTPIdentifier).Header)
+
+	h.Add("Etag", "notsafelisted")
+	h.Add("Accept-Encoding", "brotli")
+	buf.Reset()
+	_ = h.Write(buf)
+
+	id, err = hs.Identifier("https", "example.org", map[string]string{pb.AttrHTTPHeader: buf.String()}, nil)
+	require.ErrorContains(t, err, "Etag")
+	require.ErrorContains(t, err, "Accept-Encoding")
+	require.Nil(t, id)
+}
+
+func TestHTTPHeader(t *testing.T) {
+	t.Parallel()
+	ctx := context.TODO()
+
+	hs, err := newHTTPSource(t)
+	require.NoError(t, err)
+
+	var requestHeader http.Header
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestHeader = r.Header
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	header := new(http.Header)
+	header.Add("Accept", "application/json")
+	header.Add("Accept", "application/xml")
+
+	id := &HTTPIdentifier{URL: server.URL, Header: *header}
+
+	h, err := hs.Resolve(ctx, id, nil, nil)
+	require.NoError(t, err)
+
+	_, _, _, _, err = h.CacheKey(ctx, nil, 0)
+	require.NoError(t, err)
+
+	require.Equal(t, header.Values("Accept"), requestHeader.Values("Accept"))
 }
 
 func readFile(ctx context.Context, ref cache.ImmutableRef, fp string) ([]byte, error) {

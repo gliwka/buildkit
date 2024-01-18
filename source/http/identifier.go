@@ -1,6 +1,8 @@
 package http
 
 import (
+	"net/http"
+
 	"github.com/moby/buildkit/solver/llbsolver/provenance"
 	"github.com/moby/buildkit/source"
 	srctypes "github.com/moby/buildkit/source/types"
@@ -24,6 +26,7 @@ type HTTPIdentifier struct {
 	Perm     int
 	UID      int
 	GID      int
+	Header   http.Header
 }
 
 var _ source.Identifier = (*HTTPIdentifier)(nil)

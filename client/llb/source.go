@@ -1,9 +1,11 @@
 package llb
 
 import (
+	"bytes"
 	"context"
 	_ "crypto/sha256" // for opencontainers/go-digest
 	"encoding/json"
+	"net/http"
 	"os"
 	"path"
 	"strconv"
@@ -584,6 +586,13 @@ func HTTP(url string, opts ...HTTPOption) State {
 		attrs[pb.AttrHTTPGID] = strconv.Itoa(hi.GID)
 		addCap(&hi.Constraints, pb.CapSourceHTTPUIDGID)
 	}
+	if hi.Header != nil {
+		serializedHeaders := new(bytes.Buffer)
+		// We can safely disregard the error value, it's only propagated up from the writer
+		// which is a string buffer in our case. error return value on a buffer write is always nil.
+		_ = hi.Header.Write(serializedHeaders)
+		attrs[pb.AttrHTTPHeader] = serializedHeaders.String()
+	}
 
 	addCap(&hi.Constraints, pb.CapSourceHTTP)
 	source := NewSource(url, attrs, hi.Constraints)
@@ -597,6 +606,7 @@ type HTTPInfo struct {
 	Perm     int
 	UID      int
 	GID      int
+	Header   http.Header
 }
 
 type HTTPOption interface {
@@ -631,6 +641,12 @@ func Chown(uid, gid int) HTTPOption {
 	return httpOptionFunc(func(hi *HTTPInfo) {
 		hi.UID = uid
 		hi.GID = gid
+	})
+}
+
+func Header(header http.Header) HTTPOption {
+	return httpOptionFunc(func(hi *HTTPInfo) {
+		hi.Header = header
 	})
 }
 
